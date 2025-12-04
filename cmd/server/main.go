@@ -4,14 +4,15 @@ import (
 	"log"
 	"os"
 
-	"github.com/joho/godotenv"
 	"boilerplate/internal/app"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using environment variables")
+		log.Printf("using environment variables; godotenv.Load() returned: %v", err)
 	}
 
 	// Get PORT from environment
