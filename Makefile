@@ -40,6 +40,11 @@ shell: ## Run interactive shell in the container
 stop: ## Stop the container
 	docker stop $(project_name)
 
-start: ## Start the container
-	docker start $(project_name)
+start: ## Start the container (creates it if it doesn't exist)
+	@if docker ps -a --format '{{.Names}}' | grep -q "^$(project_name)$$"; then \
+		docker start $(project_name); \
+	else \
+		echo "Container doesn't exist. Creating and starting it..."; \
+		make up-silent; \
+	fi
 

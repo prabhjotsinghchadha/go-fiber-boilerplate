@@ -11,7 +11,7 @@ COPY . .
 RUN go mod download
 
 # Builds the application as a staticly linked one, to allow it to run on alpine
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o app .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o app ./cmd/server
 
 
 # Moving the binary to the 'final Image' to make it smaller
@@ -19,11 +19,7 @@ FROM alpine:latest as release
 
 WORKDIR /app
 
-# Create the `public` dir and copy all the assets into it
-RUN mkdir ./static
-COPY ./static ./static
-
-# `boilerplate` should be replaced here as well
+# Copy the built binary from the build stage
 COPY --from=build /go/src/boilerplate/app .
 
 # Add packages
