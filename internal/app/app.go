@@ -1,6 +1,7 @@
 package app
 
 import (
+	"boilerplate/internal/handlers"
 	"boilerplate/internal/middleware"
 	"log"
 	"os"
@@ -152,6 +153,9 @@ func setupPublicRoutes(app *fiber.App) {
 			"status": "ok",
 		})
 	})
+
+	// GraphQL proxy to Supabase (public for now; wrap in auth group later for mutations)
+	app.All("/graphql", handlers.GraphQLProxy)
 }
 
 // setupProtectedRoutes registers protected routes that require authentication and rate limiting.
