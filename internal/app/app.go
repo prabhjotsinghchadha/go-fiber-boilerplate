@@ -11,6 +11,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/gofiber/websocket/v2"
 )
 
 // NewApp creates and configures a new Fiber application with middleware and routes.
@@ -156,6 +157,10 @@ func setupPublicRoutes(app *fiber.App) {
 
 	// GraphQL proxy to Supabase (public for now; wrap in auth group later for mutations)
 	app.All("/graphql", handlers.GraphQLProxy)
+
+	// WebSocket endpoint for Realtime updates
+	app.Use("/ws", handlers.UpgradeWebSocket)
+	app.Get("/ws", websocket.New(handlers.WebSocketHandler))
 }
 
 // setupProtectedRoutes registers protected routes that require authentication and rate limiting.
