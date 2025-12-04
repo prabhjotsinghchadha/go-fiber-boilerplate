@@ -1,33 +1,44 @@
-# Building the binary of the App
+# Multi-stage Dockerfile optimized for Fly.io deployment
+# Stage 1: Build the application
 FROM golang:1.25 AS build
 
-# `boilerplate` should be replaced with your project name
 WORKDIR /go/src/boilerplate
 
-# Copy all the Code and stuff to compile everything
-COPY . .
+# Copy go mod files first for better layer caching
+COPY go.mod go.sum ./
 
-# Downloads all the dependencies in advance (could be left out, but it's more clear this way)
+# Download dependencies (cached layer if go.mod/go.sum unchanged)
 RUN go mod download
 
-# Builds the application as a staticly linked one, to allow it to run on alpine
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o app ./cmd/server
+# Copy source code
+COPY . .
 
+# Build the application as a statically linked binary
+# This allows it to run on Alpine Linux without CGO dependencies
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -a -installsuffix cgo \
+    -ldflags="-w -s" \
+    -o app ./cmd/server
 
-# Moving the binary to the 'final Image' to make it smaller
-FROM alpine:latest as release
+# Stage 2: Create minimal runtime image
+FROM alpine:latest AS release
+
+# Install dumb-init for proper signal handling and ca-certificates for HTTPS
+RUN apk --no-cache add dumb-init ca-certificates
 
 WORKDIR /app
 
-# Copy the built binary from the build stage
+# Copy only the binary from build stage (keeps image small)
 COPY --from=build /go/src/boilerplate/app .
 
-# Add packages
-RUN apk -U upgrade \
-    && apk add --no-cache dumb-init ca-certificates \
-    && chmod +x /app/app
+# Make binary executable
+RUN chmod +x /app/app
 
-# Exposes port 3000 because our program listens on that port
+# Expose port 3000 (default for the application)
 EXPOSE 3000
 
+# Use dumb-init to handle signals properly (important for graceful shutdown)
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+
+# Run the application
+CMD ["./app"]
