@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/big"
 	"net/http"
 	"os"
@@ -17,273 +16,295 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// Cache for storing RSA public keys from Supabase JWKS
 var (
-	cachedKeys   = make(map[string]*rsa.PublicKey)
+	cachedKeys    = make(map[string]*rsa.PublicKey)
 	cacheExpiries = make(map[string]time.Time)
-	cachedKeysMu sync.RWMutex
-	cacheTTL     = 1 * time.Hour // Default cache TTL
-	gracePeriod  = 5 * time.Minute // Grace period to use stale cache on fetch failure
+	cacheMu       sync.RWMutex
+	cacheTTL      = 1 * time.Hour
 )
 
-// Auth middleware validates JWT tokens and attaches user ID to context
+// Auth validates JWT tokens and attaches the user ID to the request context.
+// Supports both HS256 (symmetric) and RS256 (asymmetric) signing methods.
 func Auth() fiber.Handler {
 	jwtSecret := os.Getenv("JWT_SECRET")
 	supabaseURL := os.Getenv("SUPABASE_URL")
 
 	return func(c *fiber.Ctx) error {
 		// Extract token from Authorization header
-		authHeader := c.Get("Authorization")
-		if authHeader == "" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Missing Authorization header",
-			})
-		}
-
-		// Check for Bearer prefix
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid Authorization header format",
-			})
-		}
-
-		tokenString := parts[1]
-
-		// Parse token header to extract kid for RS256 key matching
-		parser := jwt.NewParser()
-		token, _, err := parser.ParseUnverified(tokenString, jwt.MapClaims{})
+		tokenString, err := extractTokenFromHeader(c)
 		if err != nil {
-			// Log the full error server-side with context
-			requestID := c.Locals("requestid")
-			if requestID == nil {
-				requestID = c.IP()
-			}
-			log.Printf("ERROR: Token parsing failed: %v | RequestID: %v | IP: %s", err, requestID, c.IP())
-			
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid token",
+				"error": err.Error(),
 			})
 		}
 
-		// Extract kid from token header for RS256 key matching
-		var kid string
-		if kidValue, ok := token.Header["kid"].(string); ok {
-			kid = kidValue
-		}
-
-		// Parse token with validation
-		token, err = jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Verify signing method
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); ok {
-				// HS256
-				if jwtSecret == "" {
-					return nil, fmt.Errorf("JWT_SECRET not configured")
-				}
-				return []byte(jwtSecret), nil
-			}
-
-			if _, ok := token.Method.(*jwt.SigningMethodRSA); ok {
-				// RS256 - fetch public key from Supabase using kid
-				if supabaseURL == "" {
-					return nil, fmt.Errorf("SUPABASE_URL not configured for RS256")
-				}
-				if kid == "" {
-					return nil, fmt.Errorf("kid header missing from token")
-				}
-				return getSupabasePublicKey(supabaseURL, kid)
-			}
-
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		})
-
+		// Validate token and get claims
+		claims, err := validateToken(tokenString, jwtSecret, supabaseURL)
 		if err != nil {
-			// Log the full error server-side with context
-			requestID := c.Locals("requestid")
-			if requestID == nil {
-				requestID = c.IP()
-			}
-			// Try to extract user info from token if available (even if invalid)
-			userInfo := "unknown"
-			if token != nil {
-				if claims, ok := token.Claims.(jwt.MapClaims); ok {
-					if sub, ok := claims["sub"].(string); ok {
-						userInfo = sub
-					}
-				}
-			}
-			log.Printf("ERROR: Token validation failed: %v | RequestID: %v | IP: %s | User: %s", err, requestID, c.IP(), userInfo)
-			
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": "Authentication failed",
 			})
 		}
 
-		if !token.Valid {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid token",
-			})
-		}
-
 		// Extract user ID from claims
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
+		userID, err := extractUserIDFromClaims(claims)
+		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid token claims",
+				"error": err.Error(),
 			})
 		}
 
-		// Try to get user ID from common claim fields
-		var userID string
-		if sub, ok := claims["sub"].(string); ok {
-			userID = sub
-		} else if userIDClaim, ok := claims["user_id"].(string); ok {
-			userID = userIDClaim
-		} else if id, ok := claims["id"].(string); ok {
-			userID = id
-		} else {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "User ID not found in token",
-			})
-		}
-
-		// Attach user ID to context
+		// Attach user ID to context for use in handlers
 		c.Locals("user", userID)
-
 		return c.Next()
 	}
 }
 
-// getSupabasePublicKey fetches the public key from Supabase JWKS endpoint matching the provided kid
-// Uses a package-level cache to avoid fetching JWKS on every call
+// extractTokenFromHeader extracts the JWT token from the Authorization header.
+// Returns an error if the header is missing or malformed.
+func extractTokenFromHeader(c *fiber.Ctx) (string, error) {
+	authHeader := c.Get("Authorization")
+	if authHeader == "" {
+		return "", fmt.Errorf("missing Authorization header")
+	}
+
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		return "", fmt.Errorf("invalid Authorization header format")
+	}
+
+	return parts[1], nil
+}
+
+// validateToken parses and validates a JWT token.
+// Returns the token claims if valid, or an error if validation fails.
+func validateToken(tokenString, jwtSecret, supabaseURL string) (jwt.MapClaims, error) {
+	// Parse token header to extract kid for RS256 key matching
+	parser := jwt.NewParser()
+	token, _, err := parser.ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return nil, fmt.Errorf("invalid token format: %w", err)
+	}
+
+	// Extract kid from token header for RS256
+	kid := extractKidFromToken(token)
+
+	// Parse and validate token with appropriate key
+	token, err = jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		return getSigningKey(token, jwtSecret, supabaseURL, kid)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("token validation failed: %w", err)
+	}
+
+	if !token.Valid {
+		return nil, fmt.Errorf("token is not valid")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, fmt.Errorf("invalid token claims")
+	}
+
+	return claims, nil
+}
+
+// extractKidFromToken extracts the key ID (kid) from the JWT token header.
+// Returns empty string if kid is not present.
+func extractKidFromToken(token *jwt.Token) string {
+	if kidValue, ok := token.Header["kid"].(string); ok {
+		return kidValue
+	}
+	return ""
+}
+
+// getSigningKey returns the appropriate signing key based on the token's algorithm.
+// For HS256, returns the JWT secret. For RS256, fetches the public key from Supabase.
+func getSigningKey(token *jwt.Token, jwtSecret, supabaseURL, kid string) (interface{}, error) {
+	// Handle HS256 (symmetric) tokens
+	if _, ok := token.Method.(*jwt.SigningMethodHMAC); ok {
+		if jwtSecret == "" {
+			return nil, fmt.Errorf("JWT_SECRET not configured")
+		}
+		return []byte(jwtSecret), nil
+	}
+
+	// Handle RS256 (asymmetric) tokens
+	if _, ok := token.Method.(*jwt.SigningMethodRSA); ok {
+		if supabaseURL == "" {
+			return nil, fmt.Errorf("SUPABASE_URL not configured for RS256")
+		}
+		if kid == "" {
+			return nil, fmt.Errorf("kid header missing from token")
+		}
+		return getSupabasePublicKey(supabaseURL, kid)
+	}
+
+	return nil, fmt.Errorf("unsupported signing method: %v", token.Header["alg"])
+}
+
+// extractUserIDFromClaims extracts the user ID from JWT claims.
+// Checks common claim fields: sub, user_id, and id.
+func extractUserIDFromClaims(claims jwt.MapClaims) (string, error) {
+	if sub, ok := claims["sub"].(string); ok && sub != "" {
+		return sub, nil
+	}
+	if userID, ok := claims["user_id"].(string); ok && userID != "" {
+		return userID, nil
+	}
+	if id, ok := claims["id"].(string); ok && id != "" {
+		return id, nil
+	}
+	return "", fmt.Errorf("user ID not found in token")
+}
+
+// getSupabasePublicKey fetches and caches RSA public keys from Supabase JWKS endpoint.
+// Uses a simple cache with TTL to avoid fetching keys on every request.
 func getSupabasePublicKey(supabaseURL, kid string) (*rsa.PublicKey, error) {
-	now := time.Now()
-	
-	// First, try to read from cache with read lock
-	cachedKeysMu.RLock()
-	if key, ok := cachedKeys[kid]; ok {
-		if expiry, ok := cacheExpiries[kid]; ok && now.Before(expiry) {
-			cachedKeysMu.RUnlock()
-			return key, nil
-		}
-	}
-	cachedKeysMu.RUnlock()
-
-	// Cache miss or expired, acquire write lock
-	cachedKeysMu.Lock()
-	defer cachedKeysMu.Unlock()
-
-	// Double-check after acquiring write lock (another goroutine might have updated it)
-	if key, ok := cachedKeys[kid]; ok {
-		if expiry, ok := cacheExpiries[kid]; ok && now.Before(expiry) {
-			return key, nil
-		}
+	// Check cache first
+	if key := getCachedKey(kid); key != nil {
+		return key, nil
 	}
 
-	// Check if we have a stale cache within grace period for the same kid
-	var staleKey *rsa.PublicKey
-	if key, ok := cachedKeys[kid]; ok {
-		if expiry, ok := cacheExpiries[kid]; ok && now.Before(expiry.Add(gracePeriod)) {
-			staleKey = key
-		}
+	// Cache miss - fetch from Supabase
+	key, err := fetchAndCacheKey(supabaseURL, kid)
+	if err != nil {
+		return nil, err
+	}
+
+	return key, nil
+}
+
+// getCachedKey retrieves a cached public key if it exists and hasn't expired.
+func getCachedKey(kid string) *rsa.PublicKey {
+	cacheMu.RLock()
+	defer cacheMu.RUnlock()
+
+	key, exists := cachedKeys[kid]
+	if !exists {
+		return nil
+	}
+
+	expiry, exists := cacheExpiries[kid]
+	if !exists || time.Now().After(expiry) {
+		return nil
+	}
+
+	return key
+}
+
+// fetchAndCacheKey fetches a public key from Supabase JWKS and caches it.
+func fetchAndCacheKey(supabaseURL, kid string) (*rsa.PublicKey, error) {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+
+	// Double-check cache after acquiring write lock
+	if key := getCachedKeyUnsafe(kid); key != nil {
+		return key, nil
 	}
 
 	// Fetch JWKS from Supabase
+	jwks, err := fetchJWKS(supabaseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the key matching the kid
+	keyData := findKeyByKid(jwks, kid)
+	if keyData == nil {
+		return nil, fmt.Errorf("key with kid '%s' not found in JWKS", kid)
+	}
+
+	// Build RSA public key from JWKS data
+	publicKey, err := buildRSAPublicKey(keyData)
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache the key
+	cachedKeys[kid] = publicKey
+	cacheExpiries[kid] = time.Now().Add(cacheTTL)
+
+	return publicKey, nil
+}
+
+// getCachedKeyUnsafe retrieves a cached key without locking (caller must hold lock).
+func getCachedKeyUnsafe(kid string) *rsa.PublicKey {
+	key, exists := cachedKeys[kid]
+	if !exists {
+		return nil
+	}
+
+	expiry, exists := cacheExpiries[kid]
+	if !exists || time.Now().After(expiry) {
+		return nil
+	}
+
+	return key
+}
+
+// jwksKey represents a single key in the JWKS response.
+type jwksKey struct {
+	Kty string `json:"kty"`
+	Use string `json:"use"`
+	Kid string `json:"kid"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
+// jwksResponse represents the JWKS response structure.
+type jwksResponse struct {
+	Keys []jwksKey `json:"keys"`
+}
+
+// fetchJWKS fetches the JWKS from Supabase.
+func fetchJWKS(supabaseURL string) (*jwksResponse, error) {
 	jwksURL := strings.TrimSuffix(supabaseURL, "/") + "/.well-known/jwks.json"
+
 	resp, err := http.Get(jwksURL)
 	if err != nil {
-		// If fetch fails but we have a stale key within grace period for the same kid, use it
-		if staleKey != nil {
-			log.Printf("WARN: JWKS fetch failed, using stale cached key for kid '%s': %v", kid, err)
-			return staleKey, nil
-		}
-		// Don't update cache on error - return error and keep existing cache (if any)
 		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// If fetch fails but we have a stale key within grace period for the same kid, use it
-		if staleKey != nil {
-			log.Printf("WARN: JWKS fetch returned status %d, using stale cached key for kid '%s'", resp.StatusCode, kid)
-			return staleKey, nil
-		}
-		// Don't update cache on error - return error and keep existing cache (if any)
 		return nil, fmt.Errorf("failed to fetch JWKS: status %d", resp.StatusCode)
 	}
 
-	var jwks struct {
-		Keys []struct {
-			Kty string `json:"kty"`
-			Use string `json:"use"`
-			Kid string `json:"kid"`
-			N   string `json:"n"`
-			E   string `json:"e"`
-		} `json:"keys"`
-	}
-
+	var jwks jwksResponse
 	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		// If decode fails but we have a stale key within grace period for the same kid, use it
-		if staleKey != nil {
-			log.Printf("WARN: JWKS decode failed, using stale cached key for kid '%s': %v", kid, err)
-			return staleKey, nil
-		}
-		// Don't update cache on error - return error and keep existing cache (if any)
 		return nil, fmt.Errorf("failed to decode JWKS: %w", err)
 	}
 
 	if len(jwks.Keys) == 0 {
-		// If no keys but we have a stale key within grace period for the same kid, use it
-		if staleKey != nil {
-			log.Printf("WARN: No keys found in JWKS, using stale cached key for kid '%s'", kid)
-			return staleKey, nil
-		}
-		// Don't update cache on error - return error and keep existing cache (if any)
 		return nil, fmt.Errorf("no keys found in JWKS")
 	}
 
-	// Find the key matching the kid from the token header
-	var key *struct {
-		Kty string `json:"kty"`
-		Use string `json:"use"`
-		Kid string `json:"kid"`
-		N   string `json:"n"`
-		E   string `json:"e"`
-	}
+	return &jwks, nil
+}
+
+// findKeyByKid finds a key in the JWKS response matching the given kid.
+func findKeyByKid(jwks *jwksResponse, kid string) *jwksKey {
 	for i := range jwks.Keys {
 		if jwks.Keys[i].Kid == kid {
-			key = &jwks.Keys[i]
-			break
+			return &jwks.Keys[i]
 		}
 	}
+	return nil
+}
 
-	if key == nil {
-		// Kid not found in JWKS - this is not a transient error, so never use stale fallback
-		// The requested kid is missing, which means the key rotation may have occurred
-		// and we should not use a stale key for a different kid
-		log.Printf("ERROR: Key with kid '%s' not found in JWKS", kid)
-		return nil, fmt.Errorf("key with kid '%s' not found in JWKS", kid)
-	}
-
-	// Decode base64url encoded modulus and exponent
-	nBytes, err := base64.RawURLEncoding.DecodeString(key.N)
+// buildRSAPublicKey constructs an RSA public key from JWKS key data.
+func buildRSAPublicKey(keyData *jwksKey) (*rsa.PublicKey, error) {
+	// Decode base64url encoded modulus
+	nBytes, err := base64.RawURLEncoding.DecodeString(keyData.N)
 	if err != nil {
-		// If decode fails but we have a stale key within grace period for the same kid, use it
-		if staleKey != nil {
-			log.Printf("WARN: Failed to decode modulus for kid '%s', using stale cached key: %v", kid, err)
-			return staleKey, nil
-		}
-		// Don't update cache on error - return error and keep existing cache (if any)
 		return nil, fmt.Errorf("failed to decode modulus: %w", err)
 	}
 
-	eBytes, err := base64.RawURLEncoding.DecodeString(key.E)
+	// Decode base64url encoded exponent
+	eBytes, err := base64.RawURLEncoding.DecodeString(keyData.E)
 	if err != nil {
-		// If decode fails but we have a stale key within grace period for the same kid, use it
-		if staleKey != nil {
-			log.Printf("WARN: Failed to decode exponent for kid '%s', using stale cached key: %v", kid, err)
-			return staleKey, nil
-		}
-		// Don't update cache on error - return error and keep existing cache (if any)
 		return nil, fmt.Errorf("failed to decode exponent: %w", err)
 	}
 
@@ -294,15 +315,8 @@ func getSupabasePublicKey(supabaseURL, kid string) (*rsa.PublicKey, error) {
 	}
 
 	// Create RSA public key
-	publicKey := &rsa.PublicKey{
+	return &rsa.PublicKey{
 		N: new(big.Int).SetBytes(nBytes),
 		E: eInt,
-	}
-
-	// Successfully fetched and built the key - update cache
-	cachedKeys[kid] = publicKey
-	cacheExpiries[kid] = now.Add(cacheTTL)
-
-	return publicKey, nil
+	}, nil
 }
-
