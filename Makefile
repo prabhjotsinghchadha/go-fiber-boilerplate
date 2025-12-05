@@ -23,9 +23,20 @@ build: ## Generate docker image
 build-no-cache: ## Generate docker image with no cache
 	docker build --no-cache -t $(image_name) .
 
-up-silent: ## Run local container in background
+build-and-run: ## Build image and create/update container
+	make build
+	make create
+
+create: ## Create or update container from built image
 	make delete-container-if-exist
 	docker run -d -p 3000:3000 --name $(project_name) $(image_name) ./app
+
+update: ## Update existing container (stop, remove, recreate with new image)
+	make build
+	make create
+
+up-silent: ## Run local container in background (alias for create)
+	make create
 
 up-silent-prefork: ## Run local container in background with prefork
 	make delete-container-if-exist

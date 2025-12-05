@@ -1,0 +1,28 @@
+# Render configuration file for Go Fiber backend API
+# Deploy to Render by connecting your GitHub repository
+
+services:
+  - type: web
+    name: go-fiber-backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter  # Change to 'standard' or 'pro' for production
+    region: oregon  # Change to your preferred region
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: GO_ENV
+        value: production
+      # Add your environment variables in Render dashboard:
+      # - SUPABASE_URL
+      # - SUPABASE_ANON_KEY
+      # - JWT_SECRET
+      # - ALLOWED_ORIGINS
+      # - UPSTASH_REDIS_URL (optional)
+      # - UPSTASH_REDIS_TOKEN (optional)
+      # - RATE_LIMIT_MAX (optional)
+      # - ENABLE_TRUSTED_PROXY_CHECK (optional)
+      # - TRUSTED_PROXIES (optional)
+    autoDeploy: true  # Set to false to disable auto-deploy

@@ -1,0 +1,46 @@
+# Fly.io configuration file
+# Generated for Go Fiber backend API
+
+app = "your-app-name"
+primary_region = "iad"  # Change to your preferred region
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  GO_ENV = "production"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
+
+# Health check configuration
+[checks]
+  [checks.health]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+# Environment variables should be set via:
+# fly secrets set SUPABASE_URL=xxx SUPABASE_ANON_KEY=xxx JWT_SECRET=xxx
+# fly secrets set ALLOWED_ORIGINS=https://yourdomain.com
+# fly secrets set UPSTASH_REDIS_URL=xxx UPSTASH_REDIS_TOKEN=xxx

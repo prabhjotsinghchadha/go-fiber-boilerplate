@@ -155,6 +155,10 @@ func setupPublicRoutes(app *fiber.App) {
 		})
 	})
 
+	// Demo page with interactive documentation and testing
+	app.Get("/demo", handlers.DemoPage)
+	app.Get("/", handlers.DemoPage) // Also serve demo at root
+
 	// GraphQL proxy to Supabase (public for now; wrap in auth group later for mutations)
 	app.All("/graphql", handlers.GraphQLProxy)
 
