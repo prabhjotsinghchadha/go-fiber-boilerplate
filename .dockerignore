@@ -1,1 +1,89 @@
+# Test files
 *_test.go
+*.test
+
+# Test coverage
+coverage.out
+coverage.html
+*.coverprofile
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation (not needed in Docker image)
+README.md
+README_TESTING.md
+*.md
+LICENSE
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+app
+bin/
+dist/
+
+# Dependency directories
+vendor/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# CI/CD files (not needed in image)
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Docker files (not needed inside image)
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# Deployment configs (not needed in image)
+fly.toml
+render.yaml
+railway.json
+
+# Development files
+Makefile
+loadtest.sh
+*.gif
+*.png
+*.jpg
+*.jpeg
+
+# Database files (if any)
+database/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
